@@ -574,6 +574,12 @@ restore_postgres_after_version_change() {
         --no-privileges \
         --exit-on-error < "$POSTGRES_DUMP_FILE"
     echo "PostgreSQL logical restore completed"
+
+    # A logical restore loads no planner statistics, so queries on the
+    # restored database stay slow until ANALYZE collects them.
+    docker-compose exec -T postgres \
+        psql -U postgres -d osf -v ON_ERROR_STOP=1 -c 'ANALYZE'
+    echo "PostgreSQL statistics collected"
 }
 
 # Function to enable feature flags
