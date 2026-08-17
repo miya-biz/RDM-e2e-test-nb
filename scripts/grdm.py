@@ -212,35 +212,37 @@ async def expect_dashboard(page, transition_timeout=30000, retries=3):
     
 async def ensure_project_exists(page, project_name, transition_timeout=30000):
     await expect(page.locator('//*[@data-test-create-project-modal-button]')).to_have_count(1, timeout=transition_timeout)
-    try:
-        await expect(page.locator(f'//*[@data-test-dashboard-item-title and text()="{project_name}"]')).to_be_visible()
+    # プロジェクト一覧の読込完了(一覧ヘッダ、または「まだプロジェクトがありません。」)を待ってから存在を判定する。
+    # 読込中に判定すると、既存プロジェクトを「存在しない」と誤認して同名プロジェクトを重複作成してしまう
+    await expect(page.locator('//*[text() = "プロジェクト管理者" or contains(text(), "まだプロジェクトがありません。")]')).to_be_visible(timeout=transition_timeout)
+    if await page.locator(f'//*[@data-test-dashboard-item-title and text()="{project_name}"]').count() > 0:
         return False
-    except:
-        # プロジェクトが存在しない
-        await page.locator('//*[@data-test-create-project-modal-button]').click()
 
-        # プロジェクト名フィールドが表示される
-        await expect(page.locator('//input[contains(@class, "project-name")]')).to_be_editable(timeout=transition_timeout)
-        time.sleep(1)
+    # プロジェクトが存在しない
+    await page.locator('//*[@data-test-create-project-modal-button]').click()
 
-        # プロジェクト名を入力
-        await page.locator('//input[contains(@class, "project-name")]').fill(project_name)
+    # プロジェクト名フィールドが表示される
+    await expect(page.locator('//input[contains(@class, "project-name")]')).to_be_editable(timeout=transition_timeout)
+    time.sleep(1)
+
+    # プロジェクト名を入力
+    await page.locator('//input[contains(@class, "project-name")]').fill(project_name)
+
+    # 作成ボタンが有効化される
+    create_button_locator = page.locator('//*[@data-test-create-project-submit]')
+    await expect(create_button_locator).to_be_enabled()
+
+    # 作成ボタンをクリック
+    await create_button_locator.click()
+
+    await expect(page.locator('//button[@data-test-stay-here]')).to_be_visible(timeout=transition_timeout)
+    await page.locator('//button[@data-test-stay-here]').click()
     
-        # 作成ボタンが有効化される
-        create_button_locator = page.locator('//*[@data-test-create-project-submit]')
-        await expect(create_button_locator).to_be_enabled()
-    
-        # 作成ボタンをクリック
-        await create_button_locator.click()
-    
-        await expect(page.locator('//button[@data-test-stay-here]')).to_be_visible(timeout=transition_timeout)
-        await page.locator('//button[@data-test-stay-here]').click()
-        
-        # プロジェクトダッシュボードが更新され、
-        # GRDMのボタンが表示されることを確認
-        await expect(page.locator('//*[text() = "プロジェクト管理者"]')).to_be_visible(timeout=transition_timeout)
-        await expect(page.locator(f'//*[@data-test-dashboard-item-title and text()="{project_name}"]')).to_be_visible(timeout=transition_timeout)
-        return True    
+    # プロジェクトダッシュボードが更新され、
+    # GRDMのボタンが表示されることを確認
+    await expect(page.locator('//*[text() = "プロジェクト管理者"]')).to_be_visible(timeout=transition_timeout)
+    await expect(page.locator(f'//*[@data-test-dashboard-item-title and text()="{project_name}"]')).to_be_visible(timeout=transition_timeout)
+    return True    
 
 async def delete_project(page, transition_timeout=30000):
     await page.locator(f'//ul[contains(@class, "navbar-nav")]//a[text() = "設定"]').click()
