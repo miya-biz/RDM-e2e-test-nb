@@ -225,6 +225,34 @@ BINDERHUB_EOF
 
 # Function to create docker-compose override with NII Cloud Operation images
 create_docker_override() {
+    # Python version of the WaterButler image. 3.13 images manage dependencies with
+    # Poetry and have no pip at runtime, so the requirements volume is populated by
+    # copying the installed site-packages instead of running "invoke install".
+    local wb_python_version="${WB_PYTHON_VERSION:-3.6}"
+    local wb_requirements_override=''
+    local wb_volumes_override=''
+
+    case "$wb_python_version" in
+        3.6)
+            ;;
+        3.13)
+            wb_requirements_override='    command:
+      - /bin/bash
+      - -c
+      - rm -Rf /python3.13/* &&
+        cp -Rf -p /usr/local/lib/python3.13 /
+    volumes:
+      - wb_requirements_vol:/python3.13
+      - wb_requirements_local_bin_vol:/usr/local/bin'
+            wb_volumes_override='    volumes:
+      - wb_requirements_vol:/usr/local/lib/python3.13'
+            ;;
+        *)
+            echo "Unsupported WaterButler Python version: $wb_python_version" >&2
+            return 1
+            ;;
+    esac
+
     # Use environment variables for images
     local osf_image="${OSF_IMAGE:-niicloudoperation/rdm-osf.io:latest}"
     local ember_image="${EMBER_IMAGE:-niicloudoperation/rdm-ember-osf-web:latest}"
@@ -239,7 +267,7 @@ create_docker_override() {
     echo "  Ember: $ember_image"
     echo "  CAS: $cas_image"
     echo "  MFR: $mfr_image"
-    echo "  WaterButler: $wb_image"
+    echo "  WaterButler: $wb_image (Python $wb_python_version)"
     echo "  Elasticsearch: $elasticsearch_image"
     if [ -n "$y_websocket_url" ]; then
         echo "  Y-WebSocket: $y_websocket_url"
@@ -298,10 +326,13 @@ services:
     image: ${mfr_image}
   wb:
     image: ${wb_image}
+${wb_volumes_override}
   wb_worker:
     image: ${wb_image}
+${wb_volumes_override}
   wb_requirements:
     image: ${wb_image}
+${wb_requirements_override}
   kaken_elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
     environment:

@@ -51,6 +51,14 @@ on:
         description: 'RDM-waterbutler branch to build and test against'
         required: false
         default: ''
+      wb_python_version:
+        description: 'Python version used by the WaterButler image'
+        required: false
+        default: '3.6'
+        type: choice
+        options:
+          - '3.6'
+          - '3.13'
       tljh_version:
         description: 'TLJH version (default: 1.0.0)'
         required: false
@@ -973,6 +981,7 @@ jobs:
           else
             export WB_IMAGE="${{ github.event.inputs.wb_image || 'niicloudoperation/rdm-waterbutler:latest' }}"
           fi
+          export WB_PYTHON_VERSION="${{ github.event.inputs.wb_python_version || '3.6' }}"
         fi
 
         source ${{ github.workspace }}/e2e-tests/.github/scripts/setup_rdm.sh
