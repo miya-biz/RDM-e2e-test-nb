@@ -228,9 +228,13 @@ create_docker_override() {
     # Python version of the WaterButler image. 3.13 images manage dependencies with
     # Poetry and have no pip at runtime, so the requirements volume is populated by
     # copying the installed site-packages instead of running "invoke install".
+    # The volumes get the Python version in their names so that an environment upgraded
+    # from a 3.6 image gets fresh volumes: a volume that already holds the 3.6 site-packages
+    # and the 3.6 interpreter in /usr/local/bin would otherwise be mounted into the new image.
     local wb_python_version="${WB_PYTHON_VERSION:-3.6}"
     local wb_requirements_override=''
     local wb_volumes_override=''
+    local wb_volumes_declaration=''
 
     case "$wb_python_version" in
         3.6)
@@ -242,10 +246,16 @@ create_docker_override() {
       - rm -Rf /python3.13/* &&
         cp -Rf -p /usr/local/lib/python3.13 /
     volumes:
-      - wb_requirements_vol:/python3.13
-      - wb_requirements_local_bin_vol:/usr/local/bin'
+      - wb_requirements_3_13_vol:/python3.13
+      - wb_requirements_3_13_local_bin_vol:/usr/local/bin'
             wb_volumes_override='    volumes:
-      - wb_requirements_vol:/usr/local/lib/python3.13'
+      - wb_requirements_3_13_vol:/usr/local/lib/python3.13
+      - wb_requirements_3_13_local_bin_vol:/usr/local/bin'
+            wb_volumes_declaration='volumes:
+  wb_requirements_3_13_vol:
+    external: false
+  wb_requirements_3_13_local_bin_vol:
+    external: false'
             ;;
         *)
             echo "Unsupported WaterButler Python version: $wb_python_version" >&2
@@ -343,6 +353,7 @@ ${wb_requirements_override}
       - "19200:9200"
   elasticsearch:
     image: ${elasticsearch_image}
+${wb_volumes_declaration}
 EOL
 
     echo "Docker compose override created"
