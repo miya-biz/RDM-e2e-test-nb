@@ -353,7 +353,6 @@ ${wb_requirements_override}
       - "19200:9200"
   elasticsearch:
     image: ${elasticsearch_image}
-${wb_volumes_declaration}
 EOL
 
     echo "Docker compose override created"
@@ -390,6 +389,12 @@ EOL
         python3 "${script_dir}/weko_setup_cert.py" \
             "${PWD}/docker-compose.override.yml" \
             "${script_dir}/../../../weko/nginx/keys/server.crt"
+    fi
+
+    # Top-level volume declarations go last: the steps above append further services
+    # to the override file, and they must stay under "services:".
+    if [ -n "$wb_volumes_declaration" ]; then
+        printf '\n%s\n' "$wb_volumes_declaration" >> docker-compose.override.yml
     fi
 }
 
