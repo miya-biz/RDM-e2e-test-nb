@@ -251,14 +251,65 @@ create_docker_override() {
             wb_volumes_override='    volumes:
       - wb_requirements_3_13_vol:/usr/local/lib/python3.13
       - wb_requirements_3_13_local_bin_vol:/usr/local/bin'
-            wb_volumes_declaration='volumes:
-  wb_requirements_3_13_vol:
+            wb_volumes_declaration='  wb_requirements_3_13_vol:
     external: false
   wb_requirements_3_13_local_bin_vol:
     external: false'
             ;;
         *)
             echo "Unsupported WaterButler Python version: $wb_python_version" >&2
+            return 1
+            ;;
+    esac
+
+    # Python version of the MFR image, handled the same way as WaterButler above.
+    # 3.13 images render office documents only through a Celery worker that hands the
+    # conversion to a LibreOffice server (unoserver), so both are added as services and
+    # the legacy "unoconv" listener is not used. The MFR server and its worker exchange
+    # files through /tmp, so the worker mounts the same volume as the server.
+    local mfr_python_version="${MFR_PYTHON_VERSION:-3.5}"
+    local unoserver_image="${UNOSERVER_IMAGE:-}"
+    local mfr_requirements_override=''
+    local mfr_volumes_override=''
+    local mfr_depends_on_override=''
+    local mfr_volumes_declaration=''
+    local mfr_env_additions=''
+
+    case "$mfr_python_version" in
+        3.5)
+            ;;
+        3.13)
+            if [ -z "$unoserver_image" ]; then
+                echo "UNOSERVER_IMAGE must be set for MFR Python version $mfr_python_version" >&2
+                return 1
+            fi
+            mfr_requirements_override='    command:
+      - /bin/bash
+      - -c
+      - rm -Rf /python3.13/* &&
+        cp -Rf -p /usr/local/lib/python3.13 /
+    volumes:
+      - mfr_requirements_3_13_vol:/python3.13
+      - mfr_requirements_3_13_local_bin_vol:/usr/local/bin'
+            mfr_volumes_override='    volumes:
+      - mfr_requirements_3_13_vol:/usr/local/lib/python3.13
+      - mfr_requirements_3_13_local_bin_vol:/usr/local/bin'
+            mfr_depends_on_override='    depends_on:
+      mfr_worker:
+        condition: service_healthy'
+            mfr_volumes_declaration='  mfr_requirements_3_13_vol:
+    external: false
+  mfr_requirements_3_13_local_bin_vol:
+    external: false'
+            mfr_env_additions='
+# Celery worker and LibreOffice conversion server for office document rendering
+TASKS_CONFIG_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+TASKS_CONFIG_WAIT_TIMEOUT=120
+UNOSERVER_EXTENSION_CONFIG_HOST=unoserver
+UNOSERVER_EXTENSION_CONFIG_PORT=2003'
+            ;;
+        *)
+            echo "Unsupported MFR Python version: $mfr_python_version" >&2
             return 1
             ;;
     esac
@@ -272,11 +323,48 @@ create_docker_override() {
     local elasticsearch_image="${ELASTICSEARCH_IMAGE:-elasticsearch:2}"
     local y_websocket_url="${Y_WEBSOCKET_URL:-}"
 
+    # Services that only exist for the 3.13 MFR image. They are appended inside the
+    # "services:" block of the override, so the text starts at service indentation.
+    local mfr_worker_services=''
+    if [ "$mfr_python_version" = "3.13" ]; then
+        mfr_worker_services="  mfr_worker:
+    image: ${mfr_image}
+    command: python3 -m invoke celery --hostname=mfr@%h --concurrency=2
+    restart: unless-stopped
+    env_file:
+      - .docker-compose.mfr.env
+    volumes:
+      - mfr_requirements_3_13_vol:/usr/local/lib/python3.13
+      - mfr_requirements_3_13_local_bin_vol:/usr/local/bin
+      - wb_tmp_vol:/tmp
+    depends_on:
+      rabbitmq:
+        condition: service_started
+      unoserver:
+        condition: service_healthy
+    healthcheck:
+      test: [\"CMD-SHELL\", \"python3 -m celery -A mfr.tasks.app:app inspect ping --destination=mfr@\$\$HOSTNAME --timeout=5\"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+  unoserver:
+    image: ${unoserver_image}
+    restart: unless-stopped
+    healthcheck:
+      test: [\"CMD\", \"python3\", \"-c\", \"from xmlrpc.client import ServerProxy; ServerProxy('http://127.0.0.1:2003').info()\"]
+      interval: 10s
+      timeout: 10s
+      retries: 12"
+    fi
+
     echo "Creating docker-compose override with:"
     echo "  OSF: $osf_image"
     echo "  Ember: $ember_image"
     echo "  CAS: $cas_image"
-    echo "  MFR: $mfr_image"
+    echo "  MFR: $mfr_image (Python $mfr_python_version)"
+    if [ -n "$unoserver_image" ]; then
+        echo "  unoserver: $unoserver_image"
+    fi
     echo "  WaterButler: $wb_image (Python $wb_python_version)"
     echo "  Elasticsearch: $elasticsearch_image"
     if [ -n "$y_websocket_url" ]; then
@@ -332,8 +420,12 @@ services:
     image: ${cas_image}
   mfr:
     image: ${mfr_image}
+${mfr_volumes_override}
+${mfr_depends_on_override}
   mfr_requirements:
     image: ${mfr_image}
+${mfr_requirements_override}
+${mfr_worker_services}
   wb:
     image: ${wb_image}
 ${wb_volumes_override}
@@ -377,6 +469,10 @@ EOL
     echo "" >> .docker-compose.wb.env
     echo "SERVER_CONFIG_DOMAIN=http://192.168.168.167:7777" >> .docker-compose.wb.env
 
+    if [ -n "$mfr_env_additions" ]; then
+        printf '%s\n' "$mfr_env_additions" >> .docker-compose.mfr.env
+    fi
+
     if [ "${MINIO_ENABLED:-false}" = "true" ]; then
         local script_dir
         script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -393,8 +489,14 @@ EOL
 
     # Top-level volume declarations go last: the steps above append further services
     # to the override file, and they must stay under "services:".
-    if [ -n "$wb_volumes_declaration" ]; then
-        printf '\n%s\n' "$wb_volumes_declaration" >> docker-compose.override.yml
+    if [ -n "$wb_volumes_declaration" ] || [ -n "$mfr_volumes_declaration" ]; then
+        printf '\nvolumes:\n' >> docker-compose.override.yml
+        if [ -n "$wb_volumes_declaration" ]; then
+            printf '%s\n' "$wb_volumes_declaration" >> docker-compose.override.yml
+        fi
+        if [ -n "$mfr_volumes_declaration" ]; then
+            printf '%s\n' "$mfr_volumes_declaration" >> docker-compose.override.yml
+        fi
     fi
 }
 

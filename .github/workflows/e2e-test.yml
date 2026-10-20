@@ -39,6 +39,22 @@ on:
         description: 'Custom MFR image (default: niicloudoperation/rdm-modular-file-renderer:latest)'
         required: false
         default: ''
+      mfr_repository:
+        description: 'RDM-modular-file-renderer repository (default: RCOSDP/RDM-modular-file-renderer)'
+        required: false
+        default: ''
+      mfr_branch:
+        description: 'RDM-modular-file-renderer branch to build and test against'
+        required: false
+        default: ''
+      mfr_python_version:
+        description: 'Python version used by the MFR image (3.13 runs office previews through a Celery worker and unoserver)'
+        required: false
+        default: '3.5'
+        type: choice
+        options:
+          - '3.5'
+          - '3.13'
       wb_image:
         description: 'Custom WaterButler image (default: niicloudoperation/rdm-waterbutler:latest)'
         required: false
@@ -117,6 +133,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       wb_custom: ${{ steps.wb_params.outputs.branch != '' }}
+      mfr_custom: ${{ steps.mfr_params.outputs.branch != '' }}
     steps:
     - name: Checkout test repository
       uses: actions/checkout@v4
@@ -176,6 +193,45 @@ jobs:
         cd ..
         docker save -o prebuilt-images/rdm-waterbutler-custom.tar rdm-waterbutler:custom
 
+    - name: Parse MFR parameters
+      id: mfr_params
+      env:
+        PR_BODY: ${{ github.event.pull_request.body }}
+      run: |
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          printf '%s\n' "$PR_BODY" > /tmp/pr_body.txt
+          echo "repository=$(grep -oP '^-\s*MFR_REPOSITORY:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' \r' || true)" >> $GITHUB_OUTPUT
+          echo "branch=$(grep -oP '^-\s*MFR_BRANCH:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' \r' || true)" >> $GITHUB_OUTPUT
+        else
+          echo "repository=${{ github.event.inputs.mfr_repository }}" >> $GITHUB_OUTPUT
+          echo "branch=${{ github.event.inputs.mfr_branch }}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build custom MFR images
+      if: steps.mfr_params.outputs.branch != ''
+      run: |
+        MFR_REPO="${{ steps.mfr_params.outputs.repository || 'RCOSDP/RDM-modular-file-renderer' }}"
+        MFR_BRANCH="${{ steps.mfr_params.outputs.branch }}"
+        MFR_BASE_BRANCH="develop"
+
+        echo "Building custom MFR images from ${MFR_REPO}@${MFR_BRANCH}"
+
+        # Clone base branch
+        git clone --depth=50 -b "$MFR_BASE_BRANCH" "https://github.com/${MFR_REPO}.git" RDM-modular-file-renderer
+        cd RDM-modular-file-renderer
+
+        # Merge custom branch
+        git fetch origin "$MFR_BRANCH"
+        git config user.name "github-actions[bot]"
+        git config user.email "RDM-e2e-test-nb@example.com"
+        git merge --no-ff FETCH_HEAD -m "Merge ${MFR_BRANCH} for E2E tests"
+
+        # Build the MFR image and the LibreOffice conversion server it renders office documents with
+        docker build -t rdm-mfr:custom .
+        docker build -f Dockerfile.unoserver -t rdm-unoserver:custom .
+        cd ..
+        docker save -o prebuilt-images/rdm-mfr-custom.tar rdm-mfr:custom rdm-unoserver:custom
+
     - name: Upload prebuilt images
       uses: actions/upload-artifact@v4
       with:
@@ -197,6 +253,7 @@ jobs:
             skip_admin: true
             skip_metadata: false
             skip_autofill: true
+            mfr_preview_enabled: true
             minio_enabled: false
             weko_enabled: false
             mibyo_db_enabled: false
@@ -701,6 +758,12 @@ jobs:
           docker load -i prebuilt-images/rdm-waterbutler-custom.tar
           echo "WB_IMAGE=rdm-waterbutler:custom" >> "$GITHUB_ENV"
         fi
+
+        if [ "${{ needs.build-images.outputs.mfr_custom }}" = "true" ]; then
+          docker load -i prebuilt-images/rdm-mfr-custom.tar
+          echo "MFR_IMAGE=rdm-mfr:custom" >> "$GITHUB_ENV"
+          echo "UNOSERVER_IMAGE=rdm-unoserver:custom" >> "$GITHUB_ENV"
+        fi
         rm -rf prebuilt-images
 
     - name: Install Docker Compose
@@ -1014,7 +1077,11 @@ jobs:
           fi
           export EMBER_IMAGE="${EMBER_OVERRIDE:-niicloudoperation/rdm-ember-osf-web:latest}"
           export CAS_IMAGE="${CAS_OVERRIDE:-niicloudoperation/rdm-cas-overlay:latest}"
-          export MFR_IMAGE="${MFR_OVERRIDE:-niicloudoperation/rdm-modular-file-renderer:latest}"
+          if [[ -n "$MFR_IMAGE" ]]; then
+            export MFR_IMAGE
+          else
+            export MFR_IMAGE="${MFR_OVERRIDE:-niicloudoperation/rdm-modular-file-renderer:latest}"
+          fi
           if [[ -n "$WB_IMAGE" ]]; then
             export WB_IMAGE
           else
@@ -1030,7 +1097,12 @@ jobs:
           fi
           export EMBER_IMAGE="${{ github.event.inputs.ember_image || 'niicloudoperation/rdm-ember-osf-web:latest' }}"
           export CAS_IMAGE="${{ github.event.inputs.cas_image || 'niicloudoperation/rdm-cas-overlay:latest' }}"
-          export MFR_IMAGE="${{ github.event.inputs.mfr_image || 'niicloudoperation/rdm-modular-file-renderer:latest' }}"
+          if [[ -n "$MFR_IMAGE" ]]; then
+            export MFR_IMAGE
+          else
+            export MFR_IMAGE="${{ github.event.inputs.mfr_image || 'niicloudoperation/rdm-modular-file-renderer:latest' }}"
+          fi
+          export MFR_PYTHON_VERSION="${{ github.event.inputs.mfr_python_version || '3.5' }}"
           if [[ -n "$WB_IMAGE" ]]; then
             export WB_IMAGE
           else
@@ -1424,6 +1496,8 @@ jobs:
         skip_failed_test: true  # Continue on failure
         transition_timeout: 60000
         skip_preview_check: true
+        # The preview notebook needs the office conversion stack that only the 3.13 MFR image brings up
+        mfr_preview_enabled: ${{ matrix.test-group.mfr_preview_enabled == true && github.event.inputs.mfr_python_version == '3.13' }}
         skip_130mb_upload: ${{ matrix.test-group.skip_130mb_upload || false }}
         skip_default_storage: ${{ matrix.test-group.skip_default_storage || false }}
         skip_metadata: ${{ matrix.test-group.skip_metadata }}
