@@ -16,13 +16,10 @@
 - MFR_IMAGE: 
 - MFR_REPOSITORY:
 - MFR_BRANCH:
-- MFR_PYTHON_VERSION:
 - UNOSERVER_IMAGE:
-<!-- MFR_PYTHON_VERSION (3.5 or 3.13) is detected from the MFR image when empty; a 3.13 image gets UNOSERVER_IMAGE built from the MFR sources when empty -->
+<!-- UNOSERVER_IMAGE: used with a Python 3.13 MFR image; built from the MFR sources when empty. The Python version of the MFR and WaterButler images is detected from the images -->
 - WB_IMAGE:
 - WB_REPOSITORY:
 - WB_BRANCH:
-- WB_PYTHON_VERSION:
-<!-- WB_PYTHON_VERSION (3.6 or 3.13) is detected from the WaterButler image when empty -->
 - EXCLUDE_NOTEBOOKS: 
 <!-- EXCLUDE_NOTEBOOKS: Comma-separated list of notebooks to exclude from tests -->

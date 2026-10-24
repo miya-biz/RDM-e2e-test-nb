@@ -48,11 +48,7 @@ on:
         required: false
         default: ''
       unoserver_image:
-        description: 'unoserver image for a Python 3.13 MFR image (default: built from the MFR sources; ignored when mfr_branch is given)'
-        required: false
-        default: ''
-      mfr_python_version:
-        description: 'Python version of the MFR image, 3.5 or 3.13 (default: detected from the image; 3.13 renders office previews through a Celery worker and unoserver)'
+        description: 'unoserver image for a Python 3.13 MFR image (default: built from the MFR sources; ignored when mfr_branch is given). The Python version of the MFR and WaterButler images is detected from the images'
         required: false
         default: ''
       wb_image:
@@ -65,10 +61,6 @@ on:
         default: ''
       wb_branch:
         description: 'RDM-waterbutler branch to build and test against'
-        required: false
-        default: ''
-      wb_python_version:
-        description: 'Python version of the WaterButler image, 3.6 or 3.13 (default: detected from the image)'
         required: false
         default: ''
       tljh_version:
@@ -167,17 +159,14 @@ jobs:
           echo "repository=$(grep -oP '^-\s*WB_REPOSITORY:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' \r' || true)" >> $GITHUB_OUTPUT
           echo "branch=$(grep -oP '^-\s*WB_BRANCH:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' \r' || true)" >> $GITHUB_OUTPUT
           WB_IMAGE=$(grep -oP '^-\s*WB_IMAGE:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' \r' || true)
-          WB_PYTHON_VERSION=$(grep -oP '^-\s*WB_PYTHON_VERSION:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' \r' || true)
         else
           echo "repository=${{ github.event.inputs.wb_repository }}" >> $GITHUB_OUTPUT
           echo "branch=${{ github.event.inputs.wb_branch }}" >> $GITHUB_OUTPUT
           WB_IMAGE="${{ github.event.inputs.wb_image }}"
-          WB_PYTHON_VERSION="${{ github.event.inputs.wb_python_version }}"
         fi
-        # Image and Python version are resolved here once for both trigger types and passed
-        # on as job outputs, so every E2E job wires the same image the same way
+        # The image is resolved here once for both trigger types and passed on as a job
+        # output, so every E2E job wires the same image the same way
         echo "image=${WB_IMAGE:-niicloudoperation/rdm-waterbutler:latest}" >> $GITHUB_OUTPUT
-        echo "python_version=${WB_PYTHON_VERSION}" >> $GITHUB_OUTPUT
 
     - name: Build custom WaterButler image
       if: steps.wb_params.outputs.branch != ''
@@ -203,26 +192,24 @@ jobs:
         cd ..
         docker save -o prebuilt-images/rdm-waterbutler-custom.tar rdm-waterbutler:custom
 
-    - name: Resolve WaterButler Python version
+    - name: Detect WaterButler Python version
       id: wb_version
       run: |
-        WB_PYTHON_VERSION="${{ steps.wb_params.outputs.python_version }}"
-        if [ -z "$WB_PYTHON_VERSION" ]; then
-          # Not given, so ask the image itself: the version decides how the E2E jobs wire it,
-          # and the published image changes version without any change to this workflow
-          if [ "${{ steps.wb_params.outputs.branch }}" != "" ]; then
-            IMAGE="rdm-waterbutler:custom"
-          else
-            IMAGE="${{ steps.wb_params.outputs.image }}"
-            docker pull "$IMAGE"
-          fi
-          WB_PYTHON_VERSION=$(docker run --rm --entrypoint python3 "$IMAGE" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-          if [ -z "$WB_PYTHON_VERSION" ]; then
-            echo "Could not detect the Python version of $IMAGE" >&2
-            exit 1
-          fi
-          echo "Detected Python $WB_PYTHON_VERSION in $IMAGE"
+        # The version decides how the E2E jobs wire the image (dependency volumes, worker
+        # services), and asking the image keeps this workflow valid when the published
+        # image moves to a new version
+        if [ "${{ steps.wb_params.outputs.branch }}" != "" ]; then
+          IMAGE="rdm-waterbutler:custom"
+        else
+          IMAGE="${{ steps.wb_params.outputs.image }}"
+          docker pull "$IMAGE"
         fi
+        WB_PYTHON_VERSION=$(docker run --rm --entrypoint python3 "$IMAGE" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+        if [ -z "$WB_PYTHON_VERSION" ]; then
+          echo "Could not detect the Python version of $IMAGE" >&2
+          exit 1
+        fi
+        echo "Detected Python $WB_PYTHON_VERSION in $IMAGE"
         echo "python_version=$WB_PYTHON_VERSION" >> $GITHUB_OUTPUT
 
     - name: Parse MFR parameters
@@ -236,16 +223,13 @@ jobs:
           echo "branch=$(grep -oP '^-\s*MFR_BRANCH:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' \r' || true)" >> $GITHUB_OUTPUT
           echo "unoserver_image=$(grep -oP '^-\s*UNOSERVER_IMAGE:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' \r' || true)" >> $GITHUB_OUTPUT
           MFR_IMAGE=$(grep -oP '^-\s*MFR_IMAGE:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' \r' || true)
-          MFR_PYTHON_VERSION=$(grep -oP '^-\s*MFR_PYTHON_VERSION:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' \r' || true)
         else
           echo "repository=${{ github.event.inputs.mfr_repository }}" >> $GITHUB_OUTPUT
           echo "branch=${{ github.event.inputs.mfr_branch }}" >> $GITHUB_OUTPUT
           echo "unoserver_image=${{ github.event.inputs.unoserver_image }}" >> $GITHUB_OUTPUT
           MFR_IMAGE="${{ github.event.inputs.mfr_image }}"
-          MFR_PYTHON_VERSION="${{ github.event.inputs.mfr_python_version }}"
         fi
         echo "image=${MFR_IMAGE:-niicloudoperation/rdm-modular-file-renderer:latest}" >> $GITHUB_OUTPUT
-        echo "python_version=${MFR_PYTHON_VERSION}" >> $GITHUB_OUTPUT
 
     - name: Build custom MFR images
       if: steps.mfr_params.outputs.branch != ''
@@ -272,24 +256,21 @@ jobs:
         cd ..
         docker save -o prebuilt-images/rdm-mfr-custom.tar rdm-mfr:custom rdm-unoserver:custom
 
-    - name: Resolve MFR Python version
+    - name: Detect MFR Python version
       id: mfr_version
       run: |
-        MFR_PYTHON_VERSION="${{ steps.mfr_params.outputs.python_version }}"
-        if [ -z "$MFR_PYTHON_VERSION" ]; then
-          if [ "${{ steps.mfr_params.outputs.branch }}" != "" ]; then
-            IMAGE="rdm-mfr:custom"
-          else
-            IMAGE="${{ steps.mfr_params.outputs.image }}"
-            docker pull "$IMAGE"
-          fi
-          MFR_PYTHON_VERSION=$(docker run --rm --entrypoint python3 "$IMAGE" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-          if [ -z "$MFR_PYTHON_VERSION" ]; then
-            echo "Could not detect the Python version of $IMAGE" >&2
-            exit 1
-          fi
-          echo "Detected Python $MFR_PYTHON_VERSION in $IMAGE"
+        if [ "${{ steps.mfr_params.outputs.branch }}" != "" ]; then
+          IMAGE="rdm-mfr:custom"
+        else
+          IMAGE="${{ steps.mfr_params.outputs.image }}"
+          docker pull "$IMAGE"
         fi
+        MFR_PYTHON_VERSION=$(docker run --rm --entrypoint python3 "$IMAGE" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+        if [ -z "$MFR_PYTHON_VERSION" ]; then
+          echo "Could not detect the Python version of $IMAGE" >&2
+          exit 1
+        fi
+        echo "Detected Python $MFR_PYTHON_VERSION in $IMAGE"
         echo "python_version=$MFR_PYTHON_VERSION" >> $GITHUB_OUTPUT
 
     - name: Build unoserver image for a published MFR image
