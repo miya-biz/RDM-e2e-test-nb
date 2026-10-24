@@ -48,7 +48,7 @@ on:
         required: false
         default: ''
       unoserver_image:
-        description: 'unoserver image for a Python 3.13 MFR image (default: built from the MFR sources; ignored when mfr_branch is given). The Python version of the MFR and WaterButler images is detected from the images'
+        description: 'unoserver image for an MFR image that bundles its dependencies (default: built from the MFR sources; ignored when mfr_branch is given). How the MFR and WaterButler images carry their dependencies is detected from the images'
         required: false
         default: ''
       wb_image:
@@ -122,10 +122,12 @@ jobs:
     outputs:
       wb_image: ${{ steps.wb_params.outputs.image }}
       wb_custom: ${{ steps.wb_params.outputs.branch != '' }}
-      wb_python_version: ${{ steps.wb_version.outputs.python_version }}
+      wb_layout: ${{ steps.wb_layout.outputs.layout }}
+      wb_libdir: ${{ steps.wb_layout.outputs.libdir }}
       mfr_image: ${{ steps.mfr_params.outputs.image }}
       mfr_custom: ${{ steps.mfr_params.outputs.branch != '' }}
-      mfr_python_version: ${{ steps.mfr_version.outputs.python_version }}
+      mfr_layout: ${{ steps.mfr_layout.outputs.layout }}
+      mfr_libdir: ${{ steps.mfr_layout.outputs.libdir }}
       unoserver_image: ${{ steps.mfr_params.outputs.unoserver_image }}
       unoserver_custom: ${{ steps.unoserver_build.outcome == 'success' }}
     steps:
@@ -192,25 +194,35 @@ jobs:
         cd ..
         docker save -o prebuilt-images/rdm-waterbutler-custom.tar rdm-waterbutler:custom
 
-    - name: Detect WaterButler Python version
-      id: wb_version
+    - name: Detect WaterButler dependency layout
+      id: wb_layout
       run: |
-        # The version decides how the E2E jobs wire the image (dependency volumes, worker
-        # services), and asking the image keeps this workflow valid when the published
-        # image moves to a new version
+        # The E2E jobs wire the image by two facts asked from the image itself, so the
+        # workflow stays valid when the published image moves to a new Python version:
+        #   - the directory that holds the interpreter's library and site-packages, which
+        #     is where the dependency volume is mounted
+        #   - whether the image ships pip: then its dependencies are installed at startup
+        #     with "invoke install" (legacy); otherwise it brings them installed (bundled)
         if [ "${{ steps.wb_params.outputs.branch }}" != "" ]; then
           IMAGE="rdm-waterbutler:custom"
         else
           IMAGE="${{ steps.wb_params.outputs.image }}"
           docker pull "$IMAGE"
         fi
-        WB_PYTHON_VERSION=$(docker run --rm --entrypoint python3 "$IMAGE" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-        if [ -z "$WB_PYTHON_VERSION" ]; then
-          echo "Could not detect the Python version of $IMAGE" >&2
+        PURELIB=$(docker run --rm --entrypoint python3 "$IMAGE" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+        if [ -z "$PURELIB" ]; then
+          echo "Could not detect the library directory of $IMAGE" >&2
           exit 1
         fi
-        echo "Detected Python $WB_PYTHON_VERSION in $IMAGE"
-        echo "python_version=$WB_PYTHON_VERSION" >> $GITHUB_OUTPUT
+        LIBDIR=$(dirname "$PURELIB")
+        if docker run --rm --entrypoint python3 "$IMAGE" -m pip --version >/dev/null 2>&1; then
+          LAYOUT=legacy
+        else
+          LAYOUT=bundled
+        fi
+        echo "Detected $LAYOUT dependency layout in $IMAGE (libraries in $LIBDIR)"
+        echo "layout=$LAYOUT" >> $GITHUB_OUTPUT
+        echo "libdir=$LIBDIR" >> $GITHUB_OUTPUT
 
     - name: Parse MFR parameters
       id: mfr_params
@@ -256,8 +268,8 @@ jobs:
         cd ..
         docker save -o prebuilt-images/rdm-mfr-custom.tar rdm-mfr:custom rdm-unoserver:custom
 
-    - name: Detect MFR Python version
-      id: mfr_version
+    - name: Detect MFR dependency layout
+      id: mfr_layout
       run: |
         if [ "${{ steps.mfr_params.outputs.branch }}" != "" ]; then
           IMAGE="rdm-mfr:custom"
@@ -265,22 +277,30 @@ jobs:
           IMAGE="${{ steps.mfr_params.outputs.image }}"
           docker pull "$IMAGE"
         fi
-        MFR_PYTHON_VERSION=$(docker run --rm --entrypoint python3 "$IMAGE" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-        if [ -z "$MFR_PYTHON_VERSION" ]; then
-          echo "Could not detect the Python version of $IMAGE" >&2
+        PURELIB=$(docker run --rm --entrypoint python3 "$IMAGE" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+        if [ -z "$PURELIB" ]; then
+          echo "Could not detect the library directory of $IMAGE" >&2
           exit 1
         fi
-        echo "Detected Python $MFR_PYTHON_VERSION in $IMAGE"
-        echo "python_version=$MFR_PYTHON_VERSION" >> $GITHUB_OUTPUT
+        LIBDIR=$(dirname "$PURELIB")
+        if docker run --rm --entrypoint python3 "$IMAGE" -m pip --version >/dev/null 2>&1; then
+          LAYOUT=legacy
+        else
+          LAYOUT=bundled
+        fi
+        echo "Detected $LAYOUT dependency layout in $IMAGE (libraries in $LIBDIR)"
+        echo "layout=$LAYOUT" >> $GITHUB_OUTPUT
+        echo "libdir=$LIBDIR" >> $GITHUB_OUTPUT
 
     - name: Build unoserver image for a published MFR image
       id: unoserver_build
-      if: steps.mfr_version.outputs.python_version == '3.13' && steps.mfr_params.outputs.branch == '' && steps.mfr_params.outputs.unoserver_image == ''
+      if: steps.mfr_layout.outputs.layout == 'bundled' && steps.mfr_params.outputs.branch == '' && steps.mfr_params.outputs.unoserver_image == ''
       run: |
         MFR_REPO="${{ steps.mfr_params.outputs.repository || 'RCOSDP/RDM-modular-file-renderer' }}"
 
-        # A Python 3.13 MFR image renders office documents through unoserver, and no published
-        # unoserver image exists yet, so it is built from the Dockerfile kept with the MFR sources
+        # An MFR image with bundled dependencies renders office documents through unoserver, and
+        # no published unoserver image exists yet, so it is built from the Dockerfile kept with
+        # the MFR sources
         echo "Building unoserver image from ${MFR_REPO}@develop"
         git clone --depth=1 -b develop "https://github.com/${MFR_REPO}.git" RDM-modular-file-renderer
         docker build -f RDM-modular-file-renderer/Dockerfile.unoserver -t rdm-unoserver:custom RDM-modular-file-renderer
@@ -1177,12 +1197,14 @@ jobs:
           export EMBER_IMAGE="${{ github.event.inputs.ember_image || 'niicloudoperation/rdm-ember-osf-web:latest' }}"
           export CAS_IMAGE="${{ github.event.inputs.cas_image || 'niicloudoperation/rdm-cas-overlay:latest' }}"
         fi
-        # MFR and WaterButler were resolved by build-images, which also detected their Python
-        # versions; images built there were already set when they were loaded
+        # MFR and WaterButler were resolved by build-images, which also detected how each
+        # image carries its dependencies; images built there were already set when loaded
         export MFR_IMAGE="${MFR_IMAGE:-${{ needs.build-images.outputs.mfr_image }}}"
         export WB_IMAGE="${WB_IMAGE:-${{ needs.build-images.outputs.wb_image }}}"
-        export MFR_PYTHON_VERSION="${{ needs.build-images.outputs.mfr_python_version }}"
-        export WB_PYTHON_VERSION="${{ needs.build-images.outputs.wb_python_version }}"
+        export MFR_LAYOUT="${{ needs.build-images.outputs.mfr_layout }}"
+        export MFR_LIBDIR="${{ needs.build-images.outputs.mfr_libdir }}"
+        export WB_LAYOUT="${{ needs.build-images.outputs.wb_layout }}"
+        export WB_LIBDIR="${{ needs.build-images.outputs.wb_libdir }}"
         export UNOSERVER_IMAGE="${UNOSERVER_IMAGE:-${{ needs.build-images.outputs.unoserver_image }}}"
 
         source ${{ github.workspace }}/e2e-tests/.github/scripts/setup_rdm.sh
@@ -1589,8 +1611,8 @@ jobs:
         skip_failed_test: true  # Continue on failure
         transition_timeout: 60000
         skip_preview_check: true
-        # The preview notebook needs the office conversion stack that only the 3.13 MFR image brings up
-        mfr_preview_enabled: ${{ matrix.test-group.mfr_preview_enabled == true && needs.build-images.outputs.mfr_python_version == '3.13' }}
+        # The preview notebook needs the office conversion stack that only an MFR image with bundled dependencies brings up
+        mfr_preview_enabled: ${{ matrix.test-group.mfr_preview_enabled == true && needs.build-images.outputs.mfr_layout == 'bundled' }}
         skip_130mb_upload: ${{ matrix.test-group.skip_130mb_upload || false }}
         skip_default_storage: ${{ matrix.test-group.skip_default_storage || false }}
         skip_metadata: ${{ matrix.test-group.skip_metadata }}

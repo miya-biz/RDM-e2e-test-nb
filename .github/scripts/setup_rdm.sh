@@ -225,49 +225,74 @@ BINDERHUB_EOF
 
 # Function to create docker-compose override with NII Cloud Operation images
 create_docker_override() {
-    # Python version of the WaterButler image. 3.13 images manage dependencies with
-    # Poetry and have no pip at runtime, so the requirements volume is populated by
-    # copying the installed site-packages instead of running "invoke install".
-    # The volumes get the Python version in their names so that an environment upgraded
-    # from a 3.6 image gets fresh volumes: a volume that already holds the 3.6 site-packages
-    # and the 3.6 interpreter in /usr/local/bin would otherwise be mounted into the new image.
-    local wb_python_version="${WB_PYTHON_VERSION:-3.6}"
+    # How the WaterButler and MFR images carry their Python dependencies, as detected from
+    # the images by the E2E workflow (WB_LAYOUT / MFR_LAYOUT) together with the directory
+    # that holds the interpreter's library and site-packages (WB_LIBDIR / MFR_LIBDIR,
+    # e.g. /usr/local/lib/python3.13):
+    #   legacy  - the image ships pip and the requirements volume is populated by running
+    #             "invoke install", as the RDM-osf.io compose definition does for it
+    #   bundled - the image has no pip and brings its dependencies installed, so the volume
+    #             is populated by copying the installed library tree instead
+    # The volumes get the library directory in their names so that an environment upgraded
+    # from a legacy image gets fresh volumes: a volume that already holds the old
+    # site-packages and the old interpreter in /usr/local/bin would otherwise be mounted
+    # into the new image.
+    # The legacy directories are the ones the RDM-osf.io docker-compose.yml mounts.
+    local legacy_wb_libdir='/usr/local/lib/python3.6'
+    local legacy_mfr_libdir='/usr/local/lib/python3.5'
+
+    local wb_layout="${WB_LAYOUT:-legacy}"
+    local wb_libdir="${WB_LIBDIR:-}"
+    local wb_libname='' wb_voltag=''
     local wb_requirements_override=''
     local wb_volumes_override=''
     local wb_volumes_declaration=''
 
-    case "$wb_python_version" in
-        3.6)
+    case "$wb_layout" in
+        legacy)
+            if [ -n "$wb_libdir" ] && [ "$wb_libdir" != "$legacy_wb_libdir" ]; then
+                echo "WaterButler image keeps its libraries in $wb_libdir, but the legacy compose definition mounts $legacy_wb_libdir" >&2
+                return 1
+            fi
             ;;
-        3.13)
-            wb_requirements_override='    command:
+        bundled)
+            wb_libname=$(basename "$wb_libdir")
+            if ! printf '%s' "$wb_libname" | grep -Eq '^python3\.[0-9]+$'; then
+                echo "WB_LIBDIR must name the library directory of a WaterButler image with bundled dependencies (got '$wb_libdir')" >&2
+                return 1
+            fi
+            wb_voltag=${wb_libname#python}
+            wb_voltag=${wb_voltag//./_}
+            wb_requirements_override="    command:
       - /bin/bash
       - -c
-      - rm -Rf /python3.13/* &&
-        cp -Rf -p /usr/local/lib/python3.13 /
+      - rm -Rf /${wb_libname}/* &&
+        cp -Rf -p ${wb_libdir} /
     volumes:
-      - wb_requirements_3_13_vol:/python3.13
-      - wb_requirements_3_13_local_bin_vol:/usr/local/bin'
-            wb_volumes_override='    volumes:
-      - wb_requirements_3_13_vol:/usr/local/lib/python3.13
-      - wb_requirements_3_13_local_bin_vol:/usr/local/bin'
-            wb_volumes_declaration='  wb_requirements_3_13_vol:
+      - wb_requirements_${wb_voltag}_vol:/${wb_libname}
+      - wb_requirements_${wb_voltag}_local_bin_vol:/usr/local/bin"
+            wb_volumes_override="    volumes:
+      - wb_requirements_${wb_voltag}_vol:${wb_libdir}
+      - wb_requirements_${wb_voltag}_local_bin_vol:/usr/local/bin"
+            wb_volumes_declaration="  wb_requirements_${wb_voltag}_vol:
     external: false
-  wb_requirements_3_13_local_bin_vol:
-    external: false'
+  wb_requirements_${wb_voltag}_local_bin_vol:
+    external: false"
             ;;
         *)
-            echo "Unsupported WaterButler Python version: $wb_python_version" >&2
+            echo "Unsupported WaterButler dependency layout: $wb_layout" >&2
             return 1
             ;;
     esac
 
-    # Python version of the MFR image, handled the same way as WaterButler above.
-    # 3.13 images render office documents only through a Celery worker that hands the
-    # conversion to a LibreOffice server (unoserver), so both are added as services and
-    # the legacy "unoconv" listener is not used. The MFR server and its worker exchange
-    # files through /tmp, so the worker mounts the same volume as the server.
-    local mfr_python_version="${MFR_PYTHON_VERSION:-3.5}"
+    # MFR is handled the same way. An MFR image with bundled dependencies renders office
+    # documents only through a Celery worker that hands the conversion to a LibreOffice
+    # server (unoserver), so both are added as services and the legacy "unoconv" listener
+    # is not used. The MFR server and its worker exchange files through /tmp, so the
+    # worker mounts the same volume as the server.
+    local mfr_layout="${MFR_LAYOUT:-legacy}"
+    local mfr_libdir="${MFR_LIBDIR:-}"
+    local mfr_libname='' mfr_voltag=''
     local unoserver_image="${UNOSERVER_IMAGE:-}"
     local mfr_requirements_override=''
     local mfr_volumes_override=''
@@ -275,32 +300,43 @@ create_docker_override() {
     local mfr_volumes_declaration=''
     local mfr_env_additions=''
 
-    case "$mfr_python_version" in
-        3.5)
-            ;;
-        3.13)
-            if [ -z "$unoserver_image" ]; then
-                echo "UNOSERVER_IMAGE must be set for MFR Python version $mfr_python_version" >&2
+    case "$mfr_layout" in
+        legacy)
+            if [ -n "$mfr_libdir" ] && [ "$mfr_libdir" != "$legacy_mfr_libdir" ]; then
+                echo "MFR image keeps its libraries in $mfr_libdir, but the legacy compose definition mounts $legacy_mfr_libdir" >&2
                 return 1
             fi
-            mfr_requirements_override='    command:
+            ;;
+        bundled)
+            mfr_libname=$(basename "$mfr_libdir")
+            if ! printf '%s' "$mfr_libname" | grep -Eq '^python3\.[0-9]+$'; then
+                echo "MFR_LIBDIR must name the library directory of an MFR image with bundled dependencies (got '$mfr_libdir')" >&2
+                return 1
+            fi
+            if [ -z "$unoserver_image" ]; then
+                echo "UNOSERVER_IMAGE must be set for an MFR image with bundled dependencies" >&2
+                return 1
+            fi
+            mfr_voltag=${mfr_libname#python}
+            mfr_voltag=${mfr_voltag//./_}
+            mfr_requirements_override="    command:
       - /bin/bash
       - -c
-      - rm -Rf /python3.13/* &&
-        cp -Rf -p /usr/local/lib/python3.13 /
+      - rm -Rf /${mfr_libname}/* &&
+        cp -Rf -p ${mfr_libdir} /
     volumes:
-      - mfr_requirements_3_13_vol:/python3.13
-      - mfr_requirements_3_13_local_bin_vol:/usr/local/bin'
-            mfr_volumes_override='    volumes:
-      - mfr_requirements_3_13_vol:/usr/local/lib/python3.13
-      - mfr_requirements_3_13_local_bin_vol:/usr/local/bin'
+      - mfr_requirements_${mfr_voltag}_vol:/${mfr_libname}
+      - mfr_requirements_${mfr_voltag}_local_bin_vol:/usr/local/bin"
+            mfr_volumes_override="    volumes:
+      - mfr_requirements_${mfr_voltag}_vol:${mfr_libdir}
+      - mfr_requirements_${mfr_voltag}_local_bin_vol:/usr/local/bin"
             mfr_depends_on_override='    depends_on:
       mfr_worker:
         condition: service_healthy'
-            mfr_volumes_declaration='  mfr_requirements_3_13_vol:
+            mfr_volumes_declaration="  mfr_requirements_${mfr_voltag}_vol:
     external: false
-  mfr_requirements_3_13_local_bin_vol:
-    external: false'
+  mfr_requirements_${mfr_voltag}_local_bin_vol:
+    external: false"
             mfr_env_additions='
 # Celery worker and LibreOffice conversion server for office document rendering
 TASKS_CONFIG_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
@@ -309,7 +345,7 @@ UNOSERVER_EXTENSION_CONFIG_HOST=unoserver
 UNOSERVER_EXTENSION_CONFIG_PORT=2003'
             ;;
         *)
-            echo "Unsupported MFR Python version: $mfr_python_version" >&2
+            echo "Unsupported MFR dependency layout: $mfr_layout" >&2
             return 1
             ;;
     esac
@@ -323,10 +359,10 @@ UNOSERVER_EXTENSION_CONFIG_PORT=2003'
     local elasticsearch_image="${ELASTICSEARCH_IMAGE:-elasticsearch:2}"
     local y_websocket_url="${Y_WEBSOCKET_URL:-}"
 
-    # Services that only exist for the 3.13 MFR image. They are appended inside the
-    # "services:" block of the override, so the text starts at service indentation.
+    # Services that only exist for an MFR image with bundled dependencies. They are appended
+    # inside the "services:" block of the override, so the text starts at service indentation.
     local mfr_worker_services=''
-    if [ "$mfr_python_version" = "3.13" ]; then
+    if [ "$mfr_layout" = "bundled" ]; then
         mfr_worker_services="  mfr_worker:
     image: ${mfr_image}
     command: python3 -m invoke celery --hostname=mfr@%h --concurrency=2
@@ -334,8 +370,8 @@ UNOSERVER_EXTENSION_CONFIG_PORT=2003'
     env_file:
       - .docker-compose.mfr.env
     volumes:
-      - mfr_requirements_3_13_vol:/usr/local/lib/python3.13
-      - mfr_requirements_3_13_local_bin_vol:/usr/local/bin
+      - mfr_requirements_${mfr_voltag}_vol:${mfr_libdir}
+      - mfr_requirements_${mfr_voltag}_local_bin_vol:/usr/local/bin
       - wb_tmp_vol:/tmp
     depends_on:
       rabbitmq:
@@ -361,11 +397,11 @@ UNOSERVER_EXTENSION_CONFIG_PORT=2003'
     echo "  OSF: $osf_image"
     echo "  Ember: $ember_image"
     echo "  CAS: $cas_image"
-    echo "  MFR: $mfr_image (Python $mfr_python_version)"
+    echo "  MFR: $mfr_image ($mfr_layout dependencies${mfr_libdir:+, libraries in $mfr_libdir})"
     if [ -n "$unoserver_image" ]; then
         echo "  unoserver: $unoserver_image"
     fi
-    echo "  WaterButler: $wb_image (Python $wb_python_version)"
+    echo "  WaterButler: $wb_image ($wb_layout dependencies${wb_libdir:+, libraries in $wb_libdir})"
     echo "  Elasticsearch: $elasticsearch_image"
     if [ -n "$y_websocket_url" ]; then
         echo "  Y-WebSocket: $y_websocket_url"
