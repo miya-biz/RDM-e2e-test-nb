@@ -225,6 +225,64 @@ BINDERHUB_EOF
 
 # Function to create docker-compose override with NII Cloud Operation images
 create_docker_override() {
+    # How the WaterButler image carries its Python dependencies, as detected from the image
+    # by the E2E workflow (WB_LAYOUT) together with the directory that holds the
+    # interpreter's library and site-packages (WB_LIBDIR, e.g. /usr/local/lib/python3.13):
+    #   legacy  - the image ships pip and the requirements volume is populated by running
+    #             "invoke install", as the RDM-osf.io compose definition does for it
+    #   bundled - the image has no pip and brings its dependencies installed, so the volume
+    #             is populated by copying the installed library tree instead
+    # The volumes get the library directory in their names so that an environment upgraded
+    # from a legacy image gets fresh volumes: a volume that already holds the old
+    # site-packages and the old interpreter in /usr/local/bin would otherwise be mounted
+    # into the new image.
+    # The legacy directory is the one the RDM-osf.io docker-compose.yml mounts.
+    local legacy_wb_libdir='/usr/local/lib/python3.6'
+
+    local wb_layout="${WB_LAYOUT:-legacy}"
+    local wb_libdir="${WB_LIBDIR:-}"
+    local wb_libname='' wb_voltag=''
+    local wb_requirements_override=''
+    local wb_volumes_override=''
+    local wb_volumes_declaration=''
+
+    case "$wb_layout" in
+        legacy)
+            if [ -n "$wb_libdir" ] && [ "$wb_libdir" != "$legacy_wb_libdir" ]; then
+                echo "WaterButler image keeps its libraries in $wb_libdir, but the legacy compose definition mounts $legacy_wb_libdir" >&2
+                return 1
+            fi
+            ;;
+        bundled)
+            wb_libname=$(basename "$wb_libdir")
+            if ! printf '%s' "$wb_libname" | grep -Eq '^python3\.[0-9]+$'; then
+                echo "WB_LIBDIR must name the library directory of a WaterButler image with bundled dependencies (got '$wb_libdir')" >&2
+                return 1
+            fi
+            wb_voltag=${wb_libname#python}
+            wb_voltag=${wb_voltag//./_}
+            wb_requirements_override="    command:
+      - /bin/bash
+      - -c
+      - rm -Rf /${wb_libname}/* &&
+        cp -Rf -p ${wb_libdir} /
+    volumes:
+      - wb_requirements_${wb_voltag}_vol:/${wb_libname}
+      - wb_requirements_${wb_voltag}_local_bin_vol:/usr/local/bin"
+            wb_volumes_override="    volumes:
+      - wb_requirements_${wb_voltag}_vol:${wb_libdir}
+      - wb_requirements_${wb_voltag}_local_bin_vol:/usr/local/bin"
+            wb_volumes_declaration="  wb_requirements_${wb_voltag}_vol:
+    external: false
+  wb_requirements_${wb_voltag}_local_bin_vol:
+    external: false"
+            ;;
+        *)
+            echo "Unsupported WaterButler dependency layout: $wb_layout" >&2
+            return 1
+            ;;
+    esac
+
     # Use environment variables for images
     local osf_image="${OSF_IMAGE:-niicloudoperation/rdm-osf.io:latest}"
     local ember_image="${EMBER_IMAGE:-niicloudoperation/rdm-ember-osf-web:latest}"
@@ -239,7 +297,7 @@ create_docker_override() {
     echo "  Ember: $ember_image"
     echo "  CAS: $cas_image"
     echo "  MFR: $mfr_image"
-    echo "  WaterButler: $wb_image"
+    echo "  WaterButler: $wb_image ($wb_layout dependencies${wb_libdir:+, libraries in $wb_libdir})"
     echo "  Elasticsearch: $elasticsearch_image"
     if [ -n "$y_websocket_url" ]; then
         echo "  Y-WebSocket: $y_websocket_url"
@@ -298,10 +356,13 @@ services:
     image: ${mfr_image}
   wb:
     image: ${wb_image}
+${wb_volumes_override}
   wb_worker:
     image: ${wb_image}
+${wb_volumes_override}
   wb_requirements:
     image: ${wb_image}
+${wb_requirements_override}
   kaken_elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
     environment:
@@ -348,6 +409,13 @@ EOL
         python3 "${script_dir}/weko_setup_cert.py" \
             "${PWD}/docker-compose.override.yml" \
             "${script_dir}/../../../weko/nginx/keys/server.crt"
+    fi
+
+    # Top-level volume declarations go last: the steps above append further services
+    # to the override file, and they must stay under "services:".
+    if [ -n "$wb_volumes_declaration" ]; then
+        printf '\nvolumes:\n' >> docker-compose.override.yml
+        printf '%s\n' "$wb_volumes_declaration" >> docker-compose.override.yml
     fi
 }
 

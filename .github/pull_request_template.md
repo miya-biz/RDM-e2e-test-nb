@@ -15,5 +15,7 @@
 - CAS_IMAGE: 
 - MFR_IMAGE: 
 - WB_IMAGE:
+- WB_REPOSITORY:
+- WB_BRANCH:
 - EXCLUDE_NOTEBOOKS: 
 <!-- EXCLUDE_NOTEBOOKS: Comma-separated list of notebooks to exclude from tests -->

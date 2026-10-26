@@ -110,6 +110,8 @@ jobs:
     outputs:
       wb_image: ${{ steps.wb_params.outputs.image }}
       wb_custom: ${{ steps.wb_params.outputs.branch != '' }}
+      wb_layout: ${{ steps.wb_layout.outputs.layout }}
+      wb_libdir: ${{ steps.wb_layout.outputs.libdir }}
       mfr_image: ${{ steps.mfr_params.outputs.image }}
     steps:
     - name: Checkout test repository
@@ -174,6 +176,36 @@ jobs:
         docker build -t rdm-waterbutler:custom .
         cd ..
         docker save -o prebuilt-images/rdm-waterbutler-custom.tar rdm-waterbutler:custom
+
+    - name: Detect WaterButler dependency layout
+      id: wb_layout
+      run: |
+        # The E2E jobs wire the image by two facts asked from the image itself, so the
+        # workflow stays valid when the published image moves to a new Python version:
+        #   - the directory that holds the interpreter's library and site-packages, which
+        #     is where the dependency volume is mounted
+        #   - whether the image ships pip: then its dependencies are installed at startup
+        #     with "invoke install" (legacy); otherwise it brings them installed (bundled)
+        if [ "${{ steps.wb_params.outputs.branch }}" != "" ]; then
+          IMAGE="rdm-waterbutler:custom"
+        else
+          IMAGE="${{ steps.wb_params.outputs.image }}"
+          docker pull "$IMAGE"
+        fi
+        PURELIB=$(docker run --rm --entrypoint python3 "$IMAGE" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+        if [ -z "$PURELIB" ]; then
+          echo "Could not detect the library directory of $IMAGE" >&2
+          exit 1
+        fi
+        LIBDIR=$(dirname "$PURELIB")
+        if docker run --rm --entrypoint python3 "$IMAGE" -m pip --version >/dev/null 2>&1; then
+          LAYOUT=legacy
+        else
+          LAYOUT=bundled
+        fi
+        echo "Detected $LAYOUT dependency layout in $IMAGE (libraries in $LIBDIR)"
+        echo "layout=$LAYOUT" >> $GITHUB_OUTPUT
+        echo "libdir=$LIBDIR" >> $GITHUB_OUTPUT
 
     - name: Parse MFR parameters
       id: mfr_params
@@ -1067,10 +1099,12 @@ jobs:
           export EMBER_IMAGE="${{ github.event.inputs.ember_image || 'niicloudoperation/rdm-ember-osf-web:latest' }}"
           export CAS_IMAGE="${{ github.event.inputs.cas_image || 'niicloudoperation/rdm-cas-overlay:latest' }}"
         fi
-        # MFR and WaterButler were resolved by build-images once for both trigger types;
-        # images built there were already set when loaded
+        # MFR and WaterButler were resolved by build-images, which also detected how each
+        # image carries its dependencies; images built there were already set when loaded
         export MFR_IMAGE="${MFR_IMAGE:-${{ needs.build-images.outputs.mfr_image }}}"
         export WB_IMAGE="${WB_IMAGE:-${{ needs.build-images.outputs.wb_image }}}"
+        export WB_LAYOUT="${{ needs.build-images.outputs.wb_layout }}"
+        export WB_LIBDIR="${{ needs.build-images.outputs.wb_libdir }}"
 
         source ${{ github.workspace }}/e2e-tests/.github/scripts/setup_rdm.sh
         create_docker_override
