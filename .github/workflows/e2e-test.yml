@@ -108,7 +108,9 @@ jobs:
   build-images:
     runs-on: ubuntu-latest
     outputs:
+      wb_image: ${{ steps.wb_params.outputs.image }}
       wb_custom: ${{ steps.wb_params.outputs.branch != '' }}
+      mfr_image: ${{ steps.mfr_params.outputs.image }}
     steps:
     - name: Checkout test repository
       uses: actions/checkout@v4
@@ -139,10 +141,15 @@ jobs:
           printf '%s\n' "$PR_BODY" > /tmp/pr_body.txt
           echo "repository=$(grep -oP '^-\s*WB_REPOSITORY:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' \r' || true)" >> $GITHUB_OUTPUT
           echo "branch=$(grep -oP '^-\s*WB_BRANCH:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' \r' || true)" >> $GITHUB_OUTPUT
+          WB_IMAGE=$(grep -oP '^-\s*WB_IMAGE:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' \r' || true)
         else
           echo "repository=${{ github.event.inputs.wb_repository }}" >> $GITHUB_OUTPUT
           echo "branch=${{ github.event.inputs.wb_branch }}" >> $GITHUB_OUTPUT
+          WB_IMAGE="${{ github.event.inputs.wb_image }}"
         fi
+        # The image is resolved here once for both trigger types and passed on as a job
+        # output, so every E2E job wires the same image the same way
+        echo "image=${WB_IMAGE:-niicloudoperation/rdm-waterbutler:latest}" >> $GITHUB_OUTPUT
 
     - name: Build custom WaterButler image
       if: steps.wb_params.outputs.branch != ''
@@ -167,6 +174,19 @@ jobs:
         docker build -t rdm-waterbutler:custom .
         cd ..
         docker save -o prebuilt-images/rdm-waterbutler-custom.tar rdm-waterbutler:custom
+
+    - name: Parse MFR parameters
+      id: mfr_params
+      env:
+        PR_BODY: ${{ github.event.pull_request.body }}
+      run: |
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          printf '%s\n' "$PR_BODY" > /tmp/pr_body.txt
+          MFR_IMAGE=$(grep -oP '^-\s*MFR_IMAGE:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' \r' || true)
+        else
+          MFR_IMAGE="${{ github.event.inputs.mfr_image }}"
+        fi
+        echo "image=${MFR_IMAGE:-niicloudoperation/rdm-modular-file-renderer:latest}" >> $GITHUB_OUTPUT
 
     - name: Upload prebuilt images
       uses: actions/upload-artifact@v4
@@ -1012,8 +1032,6 @@ jobs:
           OSF_OVERRIDE=$(grep -oP '^-\s*OSF_IMAGE:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' ' || true)
           EMBER_OVERRIDE=$(grep -oP '^-\s*EMBER_IMAGE:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' ' || true)
           CAS_OVERRIDE=$(grep -oP '^-\s*CAS_IMAGE:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' ' || true)
-          MFR_OVERRIDE=$(grep -oP '^-\s*MFR_IMAGE:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' ' || true)
-          WB_OVERRIDE=$(grep -oP '^-\s*WB_IMAGE:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d ' ' || true)
           EXCLUDE_NOTEBOOKS_OVERRIDE=$(grep -oP '^-\s*EXCLUDE_NOTEBOOKS:\s*\K.*$' /tmp/pr_body.txt | head -1 | tr -d '\r' || true)
 
           # Extract TLJH parameters from PR body
@@ -1038,12 +1056,6 @@ jobs:
           fi
           export EMBER_IMAGE="${EMBER_OVERRIDE:-niicloudoperation/rdm-ember-osf-web:latest}"
           export CAS_IMAGE="${CAS_OVERRIDE:-niicloudoperation/rdm-cas-overlay:latest}"
-          export MFR_IMAGE="${MFR_OVERRIDE:-niicloudoperation/rdm-modular-file-renderer:latest}"
-          if [[ -n "$WB_IMAGE" ]]; then
-            export WB_IMAGE
-          else
-            export WB_IMAGE="${WB_OVERRIDE:-niicloudoperation/rdm-waterbutler:latest}"
-          fi
         else
           # Use workflow dispatch inputs or defaults
           # If WIKI_ENABLED, OSF_IMAGE was already set to the wiki-built image; preserve it
@@ -1054,13 +1066,11 @@ jobs:
           fi
           export EMBER_IMAGE="${{ github.event.inputs.ember_image || 'niicloudoperation/rdm-ember-osf-web:latest' }}"
           export CAS_IMAGE="${{ github.event.inputs.cas_image || 'niicloudoperation/rdm-cas-overlay:latest' }}"
-          export MFR_IMAGE="${{ github.event.inputs.mfr_image || 'niicloudoperation/rdm-modular-file-renderer:latest' }}"
-          if [[ -n "$WB_IMAGE" ]]; then
-            export WB_IMAGE
-          else
-            export WB_IMAGE="${{ github.event.inputs.wb_image || 'niicloudoperation/rdm-waterbutler:latest' }}"
-          fi
         fi
+        # MFR and WaterButler were resolved by build-images once for both trigger types;
+        # images built there were already set when loaded
+        export MFR_IMAGE="${MFR_IMAGE:-${{ needs.build-images.outputs.mfr_image }}}"
+        export WB_IMAGE="${WB_IMAGE:-${{ needs.build-images.outputs.wb_image }}}"
 
         source ${{ github.workspace }}/e2e-tests/.github/scripts/setup_rdm.sh
         create_docker_override
