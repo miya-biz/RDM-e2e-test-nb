@@ -41,7 +41,6 @@ class TestRunner:
         self.transition_timeout = 60000
         self.skip_preview_check = False
         self.mfr_preview_enabled = False
-        self.mfr_docx_preview_format = 'pdf'
         self.skip_130mb_upload = False
         self.skip_default_storage = False
         self.skip_metadata = False
@@ -263,7 +262,6 @@ class TestRunner:
             self.result_notebooks.append(self.run_notebook(
                 'テスト手順-ストレージ共通-ファイルプレビュー.ipynb',
                 target_storage_name='NII Storage',
-                docx_preview_format=self.mfr_docx_preview_format,
                 delete_project=True,
             ))
         

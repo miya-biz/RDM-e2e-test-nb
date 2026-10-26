@@ -17,6 +17,6 @@
 
 ![図形と文字の配置](preview.png)
 
-PDF は ReportLab の `UnicodeCIDFont('HeiseiMin-W3')` を使用して作成し、日本語フォントを埋め込んでいません。PDF.js が `UniJIS-UCS2-H` と `Adobe-Japan1-UCS2` の CMap を読み込むため、日本語 CMap 配信の不具合を確認できます。DOCX/PPTX の日本語フォントは変換サービス側で解決されます。DOCX は MFR の版によって PDF に変換して表示される場合と HTML に変換して表示される場合があり、Notebook は `docx_preview_format` パラメータ(`pdf` / `html`)で期待結果を切り替えます。
+PDF は ReportLab の `UnicodeCIDFont('HeiseiMin-W3')` を使用して作成し、日本語フォントを埋め込んでいません。PDF.js が `UniJIS-UCS2-H` と `Adobe-Japan1-UCS2` の CMap を読み込むため、日本語 CMap 配信の不具合を確認できます。DOCX/PPTX の日本語フォントは変換サービス側で解決されます。
 
 XLSX の日付型は MFR で `2026-01-02T00:00:00` のように表示されます。CSV の日付文字列は `2026-01-02` のままです。値と操作ごとの期待結果は Notebook を参照してください。

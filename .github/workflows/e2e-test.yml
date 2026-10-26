@@ -1614,8 +1614,6 @@ jobs:
         transition_timeout: 60000
         skip_preview_check: true
         mfr_preview_enabled: ${{ matrix.test-group.mfr_preview_enabled == true }}
-        # An MFR image with bundled dependencies renders docx as PDF through the office conversion service; a legacy image renders it as HTML
-        mfr_docx_preview_format: ${{ needs.build-images.outputs.mfr_layout == 'bundled' && 'pdf' || 'html' }}
         skip_130mb_upload: ${{ matrix.test-group.skip_130mb_upload || false }}
         skip_default_storage: ${{ matrix.test-group.skip_default_storage || false }}
         skip_metadata: ${{ matrix.test-group.skip_metadata }}
