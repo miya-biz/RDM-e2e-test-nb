@@ -42,6 +42,13 @@ async def expect_pdf_page(page, number, text, timeout):
     await expect(pdf_page.locator('canvas')).to_be_visible(timeout=timeout)
 
 
+async def expect_html_document(page, texts, timeout):
+    body = viewer(page).locator('.mfrViewer')
+    await expect(body).to_be_visible(timeout=timeout)
+    for text in texts:
+        await expect(body).to_contain_text(text, timeout=timeout)
+
+
 async def expect_table(page, rows, timeout):
     frame = viewer(page)
     await expect(frame.locator('.slick-header-column')).to_have_text(
